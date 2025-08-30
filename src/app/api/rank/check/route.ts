@@ -1,167 +1,187 @@
 // src/app/api/rank/check/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
-export const dynamic = "force-dynamic"; // avoid caching of route
-export const revalidate = 0;
-
-type RankRequest = {
-  keyword: string;
-  /** Optional domain to rank-check, e.g. "example.com" (no protocol) */
-  domain?: string;
-  /** UI language (SerpAPI hl), e.g. "en" */
-  hl?: string;
-  /** Country (SerpAPI gl), e.g. "us" */
-  gl?: string;
-  /** Google domain, e.g. "google.com" */
-  google_domain?: string;
-};
+const SERP_ENDPOINT = "https://serpapi.com/search.json";
 
 type OrganicResult = {
   position: number;
   link: string;
-  title?: string;
-  displayed_link?: string;
+  title: string;
   snippet?: string;
 };
 
-type SerpApiResponse = {
-  organic_results?: OrganicResult[];
-  search_metadata?: {
-    status?: string;
-  };
-  error?: string;
+type LocalResult = {
+  position: number;
+  title: string;
+  website?: string;
+  address?: string;
+  rating?: number;
+  reviews?: number;
 };
 
-function json(
-  body: unknown,
-  status = 200,
-): NextResponse {
-  return NextResponse.json(body, {
-    status,
-    headers: {
-      "Cache-Control": "no-store",
+type SerpApiResponse = {
+  error?: string;
+  organic_results?: OrganicResult[];
+  local_results?: LocalResult[];
+  search_parameters?: Record<string, unknown>;
+};
+
+type RankRequest = {
+  keyword: string;
+  domain: string;
+  location?: string; // e.g. "San Francisco, California, United States"
+  gl?: string; // country code, e.g. "us"
+  hl?: string; // language, e.g. "en"
+  includeLocalPack?: boolean; // also check 3-pack
+};
+
+function normalizeHostname(input: string): string {
+  try {
+    const url = new URL(input.startsWith("http") ? input : `https://${input}`);
+    return url.hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    // Not a full URL; treat as bare domain
+    return input.replace(/^www\./i, "").toLowerCase();
+  }
+}
+
+function sameDomain(a: string, b: string): boolean {
+  const A = normalizeHostname(a);
+  const B = normalizeHostname(b);
+  // match exact or subdomain of the requested domain (e.g., blog.example.com)
+  return A === B || A.endsWith(`.${B}`);
+}
+
+async function fetchSerp(params: URLSearchParams): Promise<SerpApiResponse> {
+  const url = `${SERP_ENDPOINT}?${params.toString()}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const text = await res.text();
+    return { error: `HTTP ${res.status}: ${text}` };
+  }
+  const json = (await res.json()) as SerpApiResponse;
+  return json;
+}
+
+function pickTop<T>(arr: T[] | undefined, n: number): T[] {
+  if (!arr) return [];
+  return arr.slice(0, n);
+}
+
+export async function GET() {
+  return NextResponse.json({
+    ok: true,
+    message:
+      "POST a JSON body { keyword, domain, location?, gl?, hl?, includeLocalPack? }",
+    example: {
+      keyword: "plumber near me",
+      domain: "example.com",
+      location: "San Francisco, California, United States",
+      gl: "us",
+      hl: "en",
+      includeLocalPack: true,
     },
   });
 }
 
-function sanitizeDomain(input: string): string {
-  // Removes protocol, path, query — keeps hostname only
-  try {
-    const url = new URL(input.includes("://") ? input : `https://${input}`);
-    return url.hostname.toLowerCase();
-  } catch {
-    return input.toLowerCase();
-  }
-}
-
-function hostMatchesDomain(resultUrl: string, domain: string): boolean {
-  try {
-    const host = new URL(resultUrl).hostname.toLowerCase();
-    const d = sanitizeDomain(domain);
-    return host === d || host.endsWith(`.${d}`);
-  } catch {
-    return false;
-  }
-}
-
 export async function POST(req: NextRequest) {
-  let body: RankRequest;
-  try {
-    body = (await req.json()) as RankRequest;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON body." }, 400);
-  }
+  const body = (await req.json()) as Partial<RankRequest>;
 
-  const { keyword, domain, hl = "en", gl = "us", google_domain = "google.com" } = body;
+  const keyword = (body.keyword ?? "").trim();
+  const domain = (body.domain ?? "").trim();
+  const location = (body.location ?? "").trim();
+  const gl = (body.gl ?? "us").trim();
+  const hl = (body.hl ?? "en").trim();
+  const includeLocalPack = Boolean(body.includeLocalPack);
 
-  if (!keyword || typeof keyword !== "string") {
-    return json({ ok: false, error: "Missing 'keyword' (string)." }, 400);
+  if (!keyword || !domain) {
+    return NextResponse.json(
+      { ok: false, error: "keyword and domain are required" },
+      { status: 400 }
+    );
   }
 
   const apiKey = process.env.SERP_API_KEY;
   if (!apiKey) {
-    return json(
-      { ok: false, error: "SERP_API_KEY is not set in environment." },
-      500,
+    return NextResponse.json(
+      { ok: false, error: "Missing SERP_API_KEY env var on server." },
+      { status: 500 }
     );
   }
 
-  const url = new URL("https://serpapi.com/search.json");
-  url.searchParams.set("q", keyword);
-  url.searchParams.set("hl", hl);
-  url.searchParams.set("gl", gl);
-  url.searchParams.set("google_domain", google_domain);
-  url.searchParams.set("api_key", apiKey);
+  // Build SerpAPI params
+  const params = new URLSearchParams({
+    engine: "google",
+    q: keyword,
+    api_key: apiKey,
+    google_domain: "google.com",
+    gl,
+    hl,
+    num: "20", // fetch top 20 to increase the chance of finding you
+  });
 
-  let data: SerpApiResponse;
-  try {
-    const res = await fetch(url.toString(), {
-      // Avoid Next’s caching on the server
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-    });
+  if (location) {
+    params.set("location", location);
+  }
 
-    if (!res.ok) {
-      const text = await res.text();
-      return json(
-        {
-          ok: false,
-          error: `SerpAPI request failed (${res.status})`,
-          details: text.slice(0, 500),
-        },
-        502,
-      );
+  const resp = await fetchSerp(params);
+
+  if (resp.error) {
+    return NextResponse.json({ ok: false, error: resp.error }, { status: 502 });
+  }
+
+  const organic = resp.organic_results ?? [];
+
+  // Find first organic hit for the requested domain
+  let position: number | null = null;
+  for (const item of organic) {
+    if (!item.link) continue;
+    if (sameDomain(item.link, domain)) {
+      position = item.position;
+      break;
     }
-
-    data = (await res.json()) as SerpApiResponse;
-  } catch (e: unknown) {
-    const msg =
-      e instanceof Error ? e.message : "Unknown error calling SerpAPI.";
-    return json({ ok: false, error: msg }, 502);
   }
 
-  if (data.error) {
-    return json({ ok: false, error: data.error }, 502);
-  }
-
-  const results = (data.organic_results ?? []).map((r) => ({
-    position: r.position,
-    link: r.link,
-    title: r.title ?? "",
-    displayed_link: r.displayed_link ?? "",
-    snippet: r.snippet ?? "",
-  }));
-
-  let rank: number | null = null;
-  let matchedUrl: string | null = null;
-
-  if (domain) {
-    for (const r of results) {
-      if (hostMatchesDomain(r.link, domain)) {
-        rank = r.position;
-        matchedUrl = r.link;
+  // Optional: check local 3-pack (maps) if requested
+  let localPackHit: LocalResult | null = null;
+  if (includeLocalPack && resp.local_results && resp.local_results.length) {
+    for (const place of resp.local_results) {
+      if (place.website && sameDomain(place.website, domain)) {
+        localPackHit = place;
         break;
       }
     }
   }
 
-  return json({
-    ok: true,
-    query: {
-      keyword,
-      domain: domain ?? null,
-      hl,
-      gl,
-      google_domain,
-    },
-    rank,
-    matchedUrl,
-    count: results.length,
-    results, // you can trim to top N if you want
-  });
-}
+  const top3 = pickTop(organic, 3).map((o) => ({
+    position: o.position,
+    title: o.title,
+    link: o.link,
+  }));
 
-// Optional simple health check
-export async function GET() {
-  return json({ ok: true, message: "Rank check API is live." });
+  const top10 = pickTop(organic, 10).map((o) => ({
+    position: o.position,
+    title: o.title,
+    link: o.link,
+  }));
+
+  return NextResponse.json({
+    ok: true,
+    query: { keyword, domain, location: location || null, gl, hl },
+    position, // null = not found in fetched results
+    inTop10: position !== null && position <= 10,
+    inTop3: position !== null && position <= 3,
+    localPack: includeLocalPack
+      ? {
+          matched: Boolean(localPackHit),
+          hit: localPackHit,
+        }
+      : undefined,
+    top3,
+    top10,
+    debug: {
+      organicCount: organic.length,
+      usedLocation: location || null,
+    },
+  });
 }
