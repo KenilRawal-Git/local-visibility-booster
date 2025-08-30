@@ -5,13 +5,14 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import { Resend } from 'resend';
 
+
 export async function GET() {
   try {
     const key = process.env.RESEND_API_KEY;
     if (!key) {
       return NextResponse.json({ error: 'RESEND_API_KEY missing' }, { status: 500 });
     }
-    const resend = new Resend(key);
+  const resend = new Resend(process.env.RESEND_API_KEY);
 
    // change the recipient to your inbox
 const result = await resend.emails.send({
