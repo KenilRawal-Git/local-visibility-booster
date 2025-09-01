@@ -1,6 +1,7 @@
 'use client';
 
 export type Client = {
+  ownerEmail: string;
   id: string;
   name: string;
   address?: string;
