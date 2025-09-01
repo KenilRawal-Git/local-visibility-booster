@@ -1,16 +1,19 @@
 import RankResults from "@/components/RankResults";
 
-const baseUrl =
-  typeof window === "undefined"
-    ? process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"
-    : "";
+export default async function RankPage() {
+  const baseUrl =
+    typeof window === "undefined"
+      ? process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"
+      : "";
 
-const res = await fetch(
-  `${baseUrl}/api/rank/check?keyword=plumber london&domain=plumberlondon.co.uk`
-);
+  const res = await fetch(
+    `${baseUrl}/api/rank/check?keyword=plumber london&domain=plumberlondon.co.uk`,
+    { cache: "no-store" }
+  );
 
   const data = await res.json();
 
+  // ✅ return must be inside the function body
   return (
     <main className="max-w-3xl mx-auto mt-10">
       <RankResults
