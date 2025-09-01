@@ -1,10 +1,14 @@
 import RankResults from "@/components/RankResults";
 
-export default async function RankPage() {
-  // Example: call your API
-  const res = await fetch(
-    `${process.env.NEXT_PUBLIC_SITE_URL}/api/rank/check?keyword=plumber%20london&domain=plumberlondon.co.uk`
-  );
+const baseUrl =
+  typeof window === "undefined"
+    ? process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"
+    : "";
+
+const res = await fetch(
+  `${baseUrl}/api/rank/check?keyword=plumber london&domain=plumberlondon.co.uk`
+);
+
   const data = await res.json();
 
   return (
